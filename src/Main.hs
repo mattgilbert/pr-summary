@@ -16,8 +16,10 @@ import qualified Data.ByteString.Base64 as Base64
 import Network.HTTP.Simple
 import GHC.Generics
 import Data.Aeson (FromJSON(..))
+import Data.Time.LocalTime
 import Data.Time.Clock
-import Data.Map.Strict as Map
+import Data.Time.Clock.POSIX
+import qualified Data.Map.Strict as Map
 
 -- TODO: instead of passing this around and using it, can
 -- we add a request function to this that's ready-made to
@@ -57,9 +59,14 @@ instance FromJSON PR
 
 main :: IO ()
 main = do
+    curTime <- getCurrentTime
     config <- getConfig
     reposByUrl <- getRepositories config
     openPRs <- getOpenPRs config
+
+    let printPR = printPrForZone curTime
+    let groupLines reposByUrl grp = 
+            [""] <> (formatRepoName reposByUrl grp) <> (fmap printPR grp)
 
     let sortByRepoUrl = sortBy comparePrRepoUrls
     let groupByRepoUrl = groupBy sameRepo
@@ -68,12 +75,40 @@ main = do
     let groupStrings = fmap (groupLines reposByUrl) groupedPRs
     putStrLn $ unlines $ concat groupStrings
 
+
+formatRepoName :: (Map.Map String String) -> [PR] -> [String]
+formatRepoName reposByUrl grp =
+    [repoName, separator]
     where
-        -- TODO: this is almost criminal, rework this
-        groupLines reposByUrl grp = 
-            ["", (fromJust $ Map.lookup (repository_url $ head grp) reposByUrl), "------"] ++
-            (fmap (\PR{number, title} -> (show number) ++ " - " ++ title) grp)
-    
+        url = repository_url $ head grp
+        maybeRepoName = Map.lookup url reposByUrl
+        repoName = fromJust maybeRepoName
+        separator = replicate (length repoName) '-'
+
+
+printPrForZone :: UTCTime -> PR -> String
+printPrForZone curTime PR{number, title, created_at} =
+    (show number) ++ " - " ++ formattedTime  ++ " " ++ title
+    where 
+        formattedTime = humanDuration curTime created_at
+
+humanDuration :: UTCTime -> UTCTime -> String
+humanDuration curTime t =
+    unwords 
+        $ map (\(a,b) -> (show a)++b)
+        $ filter (\(a,b) -> a > 0) [
+            (days, "d"),
+            (hours, "h"),
+            (minutes, "m"),
+            (seconds, "s")
+        ]
+    where
+        totalSeconds = round $ diffUTCTime curTime t
+        days = totalSeconds `div` 86400
+        hours = (totalSeconds `mod` 86400) `div` 3600
+        minutes = (totalSeconds `mod` 86400 `mod` 3600) `div` 60
+        seconds = (totalSeconds `mod` 86400 `mod` 3600 `mod` 60)
+
 comparePrRepoUrls :: PR -> PR -> Ordering
 comparePrRepoUrls PR{repository_url=url1} PR{repository_url=url2} =
     compare url1 url2
@@ -103,7 +138,7 @@ getAuthHeader :: Config -> String
 getAuthHeader Config{username, token} =
     BS8.unpack $ "Basic " <> (Base64.encode $ (BS8.pack username) <> ":" <> (BS8.pack token))
 
-getRepositories :: Config -> IO (Map String String)
+getRepositories :: Config -> IO (Map.Map String String)
 getRepositories config@Config{username, token, orgName} = do
     let authHeader = getAuthHeader config
     initReq <- parseRequest $ "https://api.github.com/orgs/" <> orgName <> "/repos"
@@ -124,7 +159,7 @@ getRepositories config@Config{username, token, orgName} = do
             exitFailure
         Right repos -> do
             let pairs = fmap (\Repository{name,url} -> (url, name)) repos
-            pure $ fromList pairs
+            pure $ Map.fromList pairs
 
 getOpenPRs :: Config -> IO [PR]
 getOpenPRs config@Config{username, token, orgName} = do
@@ -172,8 +207,10 @@ formatPRs prs =
  x get a repo list by url, so we can group PRs
  x use ~/.pr-summary to store username/access token
  x use ~/.pr-summary to store a default org 
- - CODE CLEANUP!!!
  - order by oldest for each group
+ - column format
+   PR# author age comment-count desc
+   - get terminal width to determine width of pr desc
  - clean up and abstract duplicate code for http requests
  - truncate long descriptions
  - show created time, show author, create fixed width columns
