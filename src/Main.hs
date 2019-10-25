@@ -10,16 +10,20 @@ import System.Directory (doesFileExist, getHomeDirectory)
 import System.FilePath ((</>))
 import Data.List
 import Data.Maybe
+import Data.Ord
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64 as Base64
 import Network.HTTP.Simple
 import GHC.Generics
 import Data.Aeson (FromJSON(..))
+import Data.Time.Format
 import Data.Time.LocalTime
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
 import qualified Data.Map.Strict as Map
+import Text.Printf
+import qualified System.Console.Terminal.Size as TermSize
 
 -- TODO: instead of passing this around and using it, can
 -- we add a request function to this that's ready-made to
@@ -46,27 +50,36 @@ data PRList = PRList
     }
     deriving (Generic, Show)
 
+data PRUser = PRUser
+    { login :: String
+    }
+    deriving (Generic, Show)
+
 data PR = PR 
     { number :: Int 
     , title :: String
     , created_at :: UTCTime
     , repository_url :: String
+    , user :: PRUser
     }
     deriving (Generic, Show)
 
+instance FromJSON PRUser
 instance FromJSON PRList
 instance FromJSON PR
 
 main :: IO ()
 main = do
     curTime <- getCurrentTime
+    termSize <- TermSize.size
+    print termSize
     config <- getConfig
     reposByUrl <- getRepositories config
     openPRs <- getOpenPRs config
 
-    let printPR = printPrForZone curTime
+    let printPR = printPrForCurTime curTime termSize
     let groupLines reposByUrl grp = 
-            [""] <> (formatRepoName reposByUrl grp) <> (fmap printPR grp)
+            [""] <> (formatRepoName reposByUrl grp) <> (fmap printPR (sortBy comparePrDate grp))
 
     let sortByRepoUrl = sortBy comparePrRepoUrls
     let groupByRepoUrl = groupBy sameRepo
@@ -86,17 +99,36 @@ formatRepoName reposByUrl grp =
         separator = replicate (length repoName) '-'
 
 
-printPrForZone :: UTCTime -> PR -> String
-printPrForZone curTime PR{number, title, created_at} =
-    (show number) ++ " - " ++ formattedTime  ++ " " ++ title
+printPrForCurTime :: UTCTime -> Maybe (TermSize.Window Int) -> PR -> String
+printPrForCurTime curTime termSize PR{number, title, created_at, user=PRUser{login}} =
+    printf "%-*s %-*s %-*s %-*s" 
+        prNumSize (show number) 
+        timeSize formattedTime 
+        loginSize (ellipsisTruncate loginSize login)
+        titleSize (ellipsisTruncate titleSize title)
     where 
+        prNumSize = 4
+        timeSize = 3
+        loginSize = 15
+        titleSize = case termSize of
+            Nothing -> 50
+            Just TermSize.Window{TermSize.width=w} -> 
+                w - (prNumSize + timeSize + loginSize) - 5
         formattedTime = humanDuration curTime created_at
+        --formattedTime = formatTime defaultTimeLocale "%FT%T%QZ" created_at
+
+ellipsisTruncate :: Int -> String -> String
+ellipsisTruncate n s =
+    if (length s > n) then
+        take (n-3) s <> "..."
+    else
+        s
 
 humanDuration :: UTCTime -> UTCTime -> String
 humanDuration curTime t =
-    unwords 
+        head
         $ map (\(a,b) -> (show a)++b)
-        $ filter (\(a,b) -> a > 0) [
+        $ dropWhile (\(a,b) -> a == 0) [
             (days, "d"),
             (hours, "h"),
             (minutes, "m"),
@@ -112,6 +144,10 @@ humanDuration curTime t =
 comparePrRepoUrls :: PR -> PR -> Ordering
 comparePrRepoUrls PR{repository_url=url1} PR{repository_url=url2} =
     compare url1 url2
+
+comparePrDate :: PR -> PR -> Ordering
+comparePrDate PR{created_at=created1} PR{created_at=created2} =
+    compare created1 created2
 
 sameRepo :: PR -> PR -> Bool
 sameRepo PR{repository_url=url1} PR{repository_url=url2} =
@@ -207,6 +243,8 @@ formatPRs prs =
  x get a repo list by url, so we can group PRs
  x use ~/.pr-summary to store username/access token
  x use ~/.pr-summary to store a default org 
+ - show which ones i've approved
+   - has to be queried by each PR, so run parallel requests
  - order by oldest for each group
  - column format
    PR# author age comment-count desc
