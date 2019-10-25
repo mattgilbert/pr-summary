@@ -19,6 +19,7 @@ executable pr-summary
                      , directory
                      , filepath
                      , terminal-size
+                     , async
 
   hs-source-dirs:      src
 

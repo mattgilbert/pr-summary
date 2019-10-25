@@ -1,9 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 
 module Main where
 
+import Prelude hiding (id)
 import Debug.Trace
 import System.Exit
 import System.Directory (doesFileExist, getHomeDirectory)
@@ -24,10 +26,8 @@ import Data.Time.Clock.POSIX
 import qualified Data.Map.Strict as Map
 import Text.Printf
 import qualified System.Console.Terminal.Size as TermSize
+import Control.Concurrent.Async
 
--- TODO: instead of passing this around and using it, can
--- we add a request function to this that's ready-made to
--- be used with the appropriate headers, etc?
 data Config = Config
     { username :: String
     , token :: String
@@ -56,7 +56,8 @@ data PRUser = PRUser
     deriving (Generic, Show)
 
 data PR = PR 
-    { number :: Int 
+    { id :: Int
+    , number :: Int 
     , title :: String
     , created_at :: UTCTime
     , repository_url :: String
@@ -64,20 +65,49 @@ data PR = PR
     }
     deriving (Generic, Show)
 
+data PRReview = PRReview
+    { user :: PRUser
+    , state :: String
+    }
+    deriving (Generic, Show)
+
+data PRItem = PRItem
+    { id :: Int
+    }
+    deriving (Generic, Show)
+
+instance FromJSON PRReview
+instance FromJSON PRItem
 instance FromJSON PRUser
 instance FromJSON PRList
 instance FromJSON PR
+
+instance Eq PR where
+    PR{id=id1} == PR{id=id2} = id1 == id2
+instance Ord PR where
+    compare PR{id=id1} PR{id=id2} = compare id1 id2
 
 main :: IO ()
 main = do
     curTime <- getCurrentTime
     termSize <- TermSize.size
-    print termSize
     config <- getConfig
-    reposByUrl <- getRepositories config
-    openPRs <- getOpenPRs config
 
-    let printPR = printPrForCurTime curTime termSize
+    putStrLn "Loading PRs and repositories concurrently..."
+    repoRequest <- async $ getRepositories config
+    prRequest <- async $ getOpenPRs config
+    reposByUrl <- wait repoRequest
+    openPRs <- wait prRequest
+
+    putStrLn "Loading comments concurrently..."
+    commentCounts <- mapConcurrently (getPRItemCount config) openPRs
+    let commentCountsByPr = Map.fromList commentCounts
+
+    putStrLn "Loading reviews/approvals concurrently..."
+    reviewCounts <- mapConcurrently (getPRReviewCount config) openPRs
+    let reviewCountsByPr = Map.fromList reviewCounts
+
+    let printPR = printPrForCurTime curTime termSize commentCountsByPr reviewCountsByPr
     let groupLines reposByUrl grp = 
             [""] <> (formatRepoName reposByUrl grp) <> (fmap printPR (sortBy comparePrDate grp))
 
@@ -99,23 +129,38 @@ formatRepoName reposByUrl grp =
         separator = replicate (length repoName) '-'
 
 
-printPrForCurTime :: UTCTime -> Maybe (TermSize.Window Int) -> PR -> String
-printPrForCurTime curTime termSize PR{number, title, created_at, user=PRUser{login}} =
-    printf "%-*s %-*s %-*s %-*s" 
-        prNumSize (show number) 
-        timeSize formattedTime 
-        loginSize (ellipsisTruncate loginSize login)
-        titleSize (ellipsisTruncate titleSize title)
+printPrForCurTime :: UTCTime -> Maybe (TermSize.Window Int) -> Map.Map PR Int -> Map.Map PR Int -> PR -> String
+printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{number, title, created_at, user=PRUser{login}} =
+    printf "%-*s %*s %*s %-*s %-*s %-*s"
+        reviewsWidth reviewText
+        commentWidth commentText
+        prNumWidth prNumberText
+        timeWidth formattedTime 
+        loginWidth (ellipsisTruncate loginWidth login)
+        titleWidth (ellipsisTruncate titleWidth title)
     where 
-        prNumSize = 4
-        timeSize = 3
-        loginSize = 15
-        titleSize = case termSize of
+        reviewsWidth = 2
+        commentWidth = 3
+        prNumWidth = 5
+        timeWidth = 3
+        loginWidth = 15
+        titleWidth = case termSize of
             Nothing -> 50
             Just TermSize.Window{TermSize.width=w} -> 
-                w - (prNumSize + timeSize + loginSize) - 5
+                w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth) - 7
+        prNumberText = (show number) -- "\27[8;;https://example.com/^GLink to example website^[]8;;\x7" :: String
         formattedTime = humanDuration curTime created_at
-        --formattedTime = formatTime defaultTimeLocale "%FT%T%QZ" created_at
+        commentCount = fromMaybe 0 (Map.lookup pr commentsByPr)
+        commentText = 
+            if commentCount > 0 then
+                (show commentCount) <> "\128172" -- speech balloon
+            else
+                ""
+        reviewText = case (Map.lookup pr reviewsByPr) of
+                Nothing -> " " :: String
+                Just 0 -> " " 
+                Just 1 -> "\10004" 
+                Just _ -> "\10004\10004"
 
 ellipsisTruncate :: Int -> String -> String
 ellipsisTruncate n s =
@@ -160,13 +205,12 @@ getConfig = do
 
     exists <- doesFileExist tokenFile
     authInfo <- if not exists then do
-                   print "Missing token file ~/.pr-summary"
+                   putStrLn "Missing token file ~/.pr-summary"
                    exitFailure
                 else do
                    readFile tokenFile
 
     let newlineChar = 10
-    -- TODO: too fragile, rework this
     let username:token:orgName:_ = lines authInfo
     pure $ Config username token orgName
 
@@ -228,12 +272,56 @@ getOpenPRs config@Config{username, token, orgName} = do
             pure items
 
 
-formatPRs :: [PR] -> String
-formatPRs prs = 
-    unlines prStrList
-    where
-    prStrList = (\PR{number, title} -> intercalate " " [ (show number) , title ]) <$> prs
-    
+getPRItemCount :: Config -> PR -> IO (PR, Int)
+getPRItemCount config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
+    let authHeader = getAuthHeader config
+    initReq <- parseRequest $ printf "%s/pulls/%d/comments" repoUrl number
+
+    let request = 
+            addRequestHeader "user-agent" (BS8.pack username) $
+            addRequestHeader "Authorization" (BS8.pack authHeader) $
+            initReq
+
+    responseAttempt <- httpJSONEither request :: IO (Response (Either JSONException [PRItem]))
+
+    case (getResponseBody responseAttempt) of
+        Left err -> do
+            case err of
+                JSONParseException _ _ _ ->
+                    print "parse exception"
+                JSONConversionException _ _ _ ->
+                    print err
+            exitFailure
+        Right comments ->
+            pure $ (pr, length comments)
+
+getPRReviewCount :: Config -> PR -> IO (PR, Int)
+getPRReviewCount config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
+    let authHeader = getAuthHeader config
+    initReq <- parseRequest $ printf "%s/pulls/%d/reviews" repoUrl number
+
+    let request = 
+            addRequestHeader "user-agent" (BS8.pack username) $
+            addRequestHeader "Authorization" (BS8.pack authHeader) $
+            initReq
+
+    responseAttempt <- httpJSONEither request :: IO (Response (Either JSONException [PRReview]))
+
+    case (getResponseBody responseAttempt) of
+        Left err -> do
+            case err of
+                JSONParseException _ _ _ ->
+                    print "parse exception"
+                JSONConversionException _ _ _ ->
+                    print err
+            exitFailure
+        Right reviews -> 
+            pure $ (pr, approvalCount)
+            where
+                approvalCount =
+                    length $ nub $ map (\PRReview{user=PRUser{login}} -> login) $
+                    filter (\PRReview{state} -> state == "APPROVED") reviews
+
 {--
  Next:
  x start by simple request to api.github.com
@@ -243,22 +331,19 @@ formatPRs prs =
  x get a repo list by url, so we can group PRs
  x use ~/.pr-summary to store username/access token
  x use ~/.pr-summary to store a default org 
- - show which ones i've approved
-   - has to be queried by each PR, so run parallel requests
- - order by oldest for each group
- - column format
-   PR# author age comment-count desc
-   - get terminal width to determine width of pr desc
- - clean up and abstract duplicate code for http requests
- - truncate long descriptions
- - show created time, show author, create fixed width columns
- - show comments count
-
- Functionality goals:
- - list all open PRs, sorted by oldest->newest
- - show which PRs have comments (by me vs others)
-   - which PRs have comments by me without reply
- - show which PRs are mine
- - show which PRs have 2 approvals
- - consider some kind of oauth thing from the command line
+ x order by oldest for each group
+ x truncate long descriptions
+ x show created time, show author, create fixed width columns
+ x parallelize comments/review http requests
+ x column format
+   approvals comment count PR# author age comment-count desc
+   x get terminal width to determine width of pr desc
+   x comment count: 3💬, or if you have an unresponded comment: 3💬!, or consider coloring
+   x approvals: ✔︎✔︎
+ - coloring:
+   - green checks when 2 approvals
+   - if not approved, gray out my PRs
+   - unresponded comments
+ - clickable link for PR number to open github
+ - code cleanup
  -}
