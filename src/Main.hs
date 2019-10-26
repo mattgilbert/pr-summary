@@ -214,98 +214,67 @@ getConfig = do
     let username:token:orgName:_ = lines authInfo
     pure $ Config username token orgName
 
-getAuthHeader :: Config -> String
-getAuthHeader Config{username, token} =
-    BS8.unpack $ "Basic " <> (Base64.encode $ (BS8.pack username) <> ":" <> (BS8.pack token))
-
 getRepositories :: Config -> IO (Map.Map String String)
 getRepositories config@Config{username, token, orgName} = do
-    let authHeader = getAuthHeader config
-    initReq <- parseRequest $ "https://api.github.com/orgs/" <> orgName <> "/repos"
-    let request = 
-            addRequestHeader "user-agent" (BS8.pack username) $
-            addRequestHeader "Authorization" (BS8.pack authHeader) $
-            initReq
+    let url = printf "https://api.github.com/orgs/%s/repos" orgName
+    repos <- httpGet config url
 
-    responseAttempt <- httpJSONEither request :: IO (Response (Either JSONException [Repository]))
-
-    case (getResponseBody responseAttempt) of
-        Left err -> do
-            case err of
-                JSONParseException _ _ _ -> do
-                    print "parse exception"
-                JSONConversionException _ _ _ -> do
-                    print "parse exception"
-            exitFailure
-        Right repos -> do
-            let pairs = fmap (\Repository{name,url} -> (url, name)) repos
-            pure $ Map.fromList pairs
+    let pairs = fmap (\Repository{name,url} -> (url, name)) repos
+    pure $ Map.fromList pairs
 
 getOpenPRs :: Config -> IO [PR]
 getOpenPRs config@Config{username, token, orgName} = do
-    let authHeader = getAuthHeader config
+    let url = "https://api.github.com/search/issues"
     let searchQuery = intercalate " "
             [ "org:" <> orgName
             , "type:pr" 
             , "state:open"
             ]
     let query = [("q", Just (BS8.pack searchQuery))]
-    initReq <- parseRequest "https://api.github.com/search/issues"
+    PRList{items} <- httpGetQuery config url query :: IO PRList
 
-    let request = 
-            addRequestHeader "user-agent" (BS8.pack username) $
-            addRequestHeader "Authorization" (BS8.pack authHeader) $
-            setRequestQueryString query $
-            initReq
-
-    responseAttempt <- httpJSONEither request :: IO (Response (Either JSONException PRList))
-
-    case (getResponseBody responseAttempt) of
-        Left err -> do
-            case err of
-                JSONParseException _ _ _ ->
-                    print "parse exception"
-                JSONConversionException _ _ _ ->
-                    print "parse exception"
-            exitFailure
-        Right PRList{total_count, items, incomplete_results} ->
-            pure items
+    pure items
 
 
 getPRItemCount :: Config -> PR -> IO (PR, Int)
 getPRItemCount config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
-    let authHeader = getAuthHeader config
-    initReq <- parseRequest $ printf "%s/pulls/%d/comments" repoUrl number
+    let url = printf "%s/pulls/%d/comments" repoUrl number
+    comments <- httpGet config url :: IO [PRItem]
 
-    let request = 
-            addRequestHeader "user-agent" (BS8.pack username) $
-            addRequestHeader "Authorization" (BS8.pack authHeader) $
-            initReq
-
-    responseAttempt <- httpJSONEither request :: IO (Response (Either JSONException [PRItem]))
-
-    case (getResponseBody responseAttempt) of
-        Left err -> do
-            case err of
-                JSONParseException _ _ _ ->
-                    print "parse exception"
-                JSONConversionException _ _ _ ->
-                    print err
-            exitFailure
-        Right comments ->
-            pure $ (pr, length comments)
+    pure $ (pr, length comments)
 
 getPRReviewCount :: Config -> PR -> IO (PR, Int)
 getPRReviewCount config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
+    let url = printf "%s/pulls/%d/reviews" repoUrl number
+    reviews <- httpGet config url :: IO [PRReview]
+
+    let approvalCount = length $ nub $ 
+            map (\PRReview{user=PRUser{login}} -> login) $ 
+            filter (\PRReview{state} -> state == "APPROVED") reviews
+
+    pure $ (pr, approvalCount)
+
+httpGet :: FromJSON a => Config -> String -> IO a
+httpGet config url =
+    httpGetQuery config url []
+
+httpGetQuery :: FromJSON a => Config -> String -> [(BS8.ByteString,Maybe BS8.ByteString)] -> IO a
+httpGetQuery config@Config{orgName, username, token} url query = do
     let authHeader = getAuthHeader config
-    initReq <- parseRequest $ printf "%s/pulls/%d/reviews" repoUrl number
+    initReq <- parseRequest url
 
     let request = 
             addRequestHeader "user-agent" (BS8.pack username) $
             addRequestHeader "Authorization" (BS8.pack authHeader) $
             initReq
 
-    responseAttempt <- httpJSONEither request :: IO (Response (Either JSONException [PRReview]))
+    let queryReq = 
+            if length query > 0 then
+                setRequestQueryString query request
+            else
+                request
+
+    responseAttempt <- httpJSONEither queryReq -- :: IO (Response (Either JSONException a))
 
     case (getResponseBody responseAttempt) of
         Left err -> do
@@ -315,35 +284,10 @@ getPRReviewCount config@Config{orgName, username, token} pr@PR{number, repositor
                 JSONConversionException _ _ _ ->
                     print err
             exitFailure
-        Right reviews -> 
-            pure $ (pr, approvalCount)
-            where
-                approvalCount =
-                    length $ nub $ map (\PRReview{user=PRUser{login}} -> login) $
-                    filter (\PRReview{state} -> state == "APPROVED") reviews
+        Right result -> 
+            pure result
 
-{--
- Next:
- x start by simple request to api.github.com
- x need to use username as user-agent
- x check reponse code
- x do a cross org PR search
- x get a repo list by url, so we can group PRs
- x use ~/.pr-summary to store username/access token
- x use ~/.pr-summary to store a default org 
- x order by oldest for each group
- x truncate long descriptions
- x show created time, show author, create fixed width columns
- x parallelize comments/review http requests
- x column format
-   approvals comment count PR# author age comment-count desc
-   x get terminal width to determine width of pr desc
-   x comment count: 3💬, or if you have an unresponded comment: 3💬!, or consider coloring
-   x approvals: ✔︎✔︎
- - coloring:
-   - green checks when 2 approvals
-   - if not approved, gray out my PRs
-   - unresponded comments
- - clickable link for PR number to open github
- - code cleanup
- -}
+
+getAuthHeader :: Config -> String
+getAuthHeader Config{username, token} =
+    BS8.unpack $ "Basic " <> (Base64.encode $ (BS8.pack username) <> ":" <> (BS8.pack token))
