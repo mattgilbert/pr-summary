@@ -52,6 +52,7 @@ data PRList = PRList
 
 data PRUser = PRUser
     { login :: String
+    , id :: Int
     }
     deriving (Generic, Show)
 
@@ -71,13 +72,14 @@ data PRReview = PRReview
     }
     deriving (Generic, Show)
 
-data PRItem = PRItem
+data PRComment = PRComment
     { id :: Int
+    , user :: PRUser
     }
     deriving (Generic, Show)
 
 instance FromJSON PRReview
-instance FromJSON PRItem
+instance FromJSON PRComment
 instance FromJSON PRUser
 instance FromJSON PRList
 instance FromJSON PR
@@ -91,7 +93,7 @@ main :: IO ()
 main = do
     curTime <- getCurrentTime
     termSize <- TermSize.size
-    config <- getConfig
+    config@Config{username=curUsername} <- getConfig
 
     putStrLn "Loading PRs and repositories concurrently..."
     repoRequest <- async $ getRepositories config
@@ -100,11 +102,11 @@ main = do
     openPRs <- wait prRequest
 
     putStrLn "Loading comments concurrently..."
-    commentCounts <- mapConcurrently (getPRItemCount config) openPRs
+    commentCounts <- mapConcurrently (getPRComments config) openPRs
     let commentCountsByPr = Map.fromList commentCounts
 
     putStrLn "Loading reviews/approvals concurrently..."
-    reviewCounts <- mapConcurrently (getPRReviewCount config) openPRs
+    reviewCounts <- mapConcurrently (getPRReviewCount curUsername config) openPRs
     let reviewCountsByPr = Map.fromList reviewCounts
 
     let printPR = printPrForCurTime curTime termSize commentCountsByPr reviewCountsByPr
@@ -129,10 +131,21 @@ formatRepoName reposByUrl grp =
         separator = replicate (length repoName) '-'
 
 
-printPrForCurTime :: UTCTime -> Maybe (TermSize.Window Int) -> Map.Map PR Int -> Map.Map PR Int -> PR -> String
+green = "\ESC[32m"
+reset = "\ESC[0m"
+{--
+ - show which PRs I've approved - green check
+ - show which PRs I've commented on - green comment count
+ -}
+printPrForCurTime :: UTCTime 
+                  -> Maybe (TermSize.Window Int) 
+                  -> Map.Map PR (Int, Bool)
+                  -> Map.Map PR (Int, Bool)
+                  -> PR 
+                  -> String
 printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{number, title, created_at, user=PRUser{login}} =
-    printf "%-*s %*s %*s %-*s %-*s %-*s"
-        reviewsWidth reviewText
+    printf "%s %*s %*s %-*s %-*s %-*s"
+        reviewText
         commentWidth commentText
         prNumWidth prNumberText
         timeWidth formattedTime 
@@ -140,7 +153,7 @@ printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{number, title,
         titleWidth (ellipsisTruncate titleWidth title)
     where 
         reviewsWidth = 2
-        commentWidth = 3
+        commentWidth = 2
         prNumWidth = 5
         timeWidth = 3
         loginWidth = 15
@@ -150,17 +163,20 @@ printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{number, title,
                 w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth) - 7
         prNumberText = (show number) -- "\27[8;;https://example.com/^GLink to example website^[]8;;\x7" :: String
         formattedTime = humanDuration curTime created_at
-        commentCount = fromMaybe 0 (Map.lookup pr commentsByPr)
-        commentText = 
-            if commentCount > 0 then
-                (show commentCount) <> "\128172" -- speech balloon
-            else
-                ""
-        reviewText = case (Map.lookup pr reviewsByPr) of
-                Nothing -> " " :: String
-                Just 0 -> " " 
-                Just 1 -> "\10004" 
-                Just _ -> "\10004\10004"
+        (commentCount, userComment) = fromMaybe (0, False) (Map.lookup pr commentsByPr)
+        commentText = case (commentCount, userComment) of
+                        (0, _) -> " "
+                        (c, True) -> green <> show c <> reset
+                        (c, False) -> show c
+        -- "\128172" -- speech balloon
+        -- TODO: handle > 9 comments text width
+        reviewText = case Map.lookup pr reviewsByPr of
+                Nothing -> "   " :: String
+                Just (0, _) -> "   " 
+                Just (1, True) -> green <> "\10004  " <> reset
+                Just (1, _) -> "\10004  " 
+                Just (_, True) -> green <> "\10004" <> reset <> "\10004 "
+                Just (_, _) -> "\10004\10004 "
 
 ellipsisTruncate :: Int -> String -> String
 ellipsisTruncate n s =
@@ -236,15 +252,21 @@ getOpenPRs config@Config{username, token, orgName} = do
     pure items
 
 
-getPRItemCount :: Config -> PR -> IO (PR, Int)
-getPRItemCount config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
+getPRComments :: Config -> PR -> IO (PR, (Int, Bool))
+getPRComments config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
     let url = printf "%s/pulls/%d/comments" repoUrl number
-    comments <- httpGet config url :: IO [PRItem]
+    comments <- httpGet config url :: IO [PRComment]
 
-    pure $ (pr, length comments)
+    let Config{username=curUsername} = config
+    let uniqueCommenters = nub $ 
+            map (\PRComment{user=PRUser{login}} -> login) comments
 
-getPRReviewCount :: Config -> PR -> IO (PR, Int)
-getPRReviewCount config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
+    let curUserCommented = curUsername `elem` uniqueCommenters
+
+    pure (pr, (length comments, curUserCommented))
+
+getPRReviewCount :: String -> Config -> PR -> IO (PR, (Int, Bool))
+getPRReviewCount curUsername config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
     let url = printf "%s/pulls/%d/reviews" repoUrl number
     reviews <- httpGet config url :: IO [PRReview]
 
@@ -252,7 +274,13 @@ getPRReviewCount config@Config{orgName, username, token} pr@PR{number, repositor
             map (\PRReview{user=PRUser{login}} -> login) $ 
             filter (\PRReview{state} -> state == "APPROVED") reviews
 
-    pure $ (pr, approvalCount)
+    let uniqueApprovals = nub $ 
+            map (\PRReview{user=PRUser{login}} -> login) $ -- one user might have multiple reviews
+            filter (\PRReview{state} -> state == "APPROVED") reviews
+
+    let curUserApproved = curUsername `elem` uniqueApprovals
+
+    pure (pr, (approvalCount, curUserApproved))
 
 httpGet :: FromJSON a => Config -> String -> IO a
 httpGet config url =
