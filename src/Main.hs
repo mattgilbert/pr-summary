@@ -62,6 +62,7 @@ data PR = PR
     , title :: String
     , created_at :: UTCTime
     , repository_url :: String
+    , html_url :: String
     , user :: PRUser
     }
     deriving (Generic, Show)
@@ -89,6 +90,14 @@ instance Eq PR where
 instance Ord PR where
     compare PR{id=id1} PR{id=id2} = compare id1 id2
 
+anchor = 
+    putStrLn link
+    where
+    -- fmt = "\27]8;;%s\27\&\\%s\27]8;;\27\\\x7"
+    fmt = "aaa %s bbb"
+    link = printf fmt ("https://google.com"::String) ("link text"::String) -- url (show number)
+
+    
 main :: IO ()
 main = do
     curTime <- getCurrentTime
@@ -130,8 +139,10 @@ formatRepoName reposByUrl grp =
         repoName = fromJust maybeRepoName
         separator = replicate (length repoName) '-'
 
-
-green = "\ESC[32m"
+-- requires truecolor terminal, which most support, including iterm, but
+-- not built in terminal.app
+-- \ESC[38;<r>;<g>;<b>;<m>m", where m is modifier (bold, italic, etc)
+green = "\ESC[38;2;0;225;0;1m"
 reset = "\ESC[0m"
 {--
  - show which PRs I've approved - green check
@@ -143,11 +154,11 @@ printPrForCurTime :: UTCTime
                   -> Map.Map PR (Int, Bool)
                   -> PR 
                   -> String
-printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{number, title, created_at, user=PRUser{login}} =
-    printf "%s %*s %*s %-*s %-*s %-*s"
+printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, number, title, created_at, user=PRUser{login}} =
+    printf "%s %s %s %-*s %-*s %-*s"
         reviewText
-        commentWidth commentText
-        prNumWidth prNumberText
+        commentText
+        prNumberText
         timeWidth formattedTime 
         loginWidth (ellipsisTruncate loginWidth login)
         titleWidth (ellipsisTruncate titleWidth title)
@@ -161,15 +172,15 @@ printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{number, title,
             Nothing -> 50
             Just TermSize.Window{TermSize.width=w} -> 
                 w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth) - 7
-        prNumberText = (show number) -- "\27[8;;https://example.com/^GLink to example website^[]8;;\x7" :: String
+        anchorEscapeSeq = "\27]8;;%s\27\&\\%s\27]8;;\27\\\x7"
+        prNumberText = printf anchorEscapeSeq html_url (show number) :: String
+            -- "\27]8;;https://google.com/\27\&\\Link to example website\27]8;;\27\\\x7"
         formattedTime = humanDuration curTime created_at
         (commentCount, userComment) = fromMaybe (0, False) (Map.lookup pr commentsByPr)
         commentText = case (commentCount, userComment) of
                         (0, _) -> " "
                         (c, True) -> green <> show c <> reset
                         (c, False) -> show c
-        -- "\128172" -- speech balloon
-        -- TODO: handle > 9 comments text width
         reviewText = case Map.lookup pr reviewsByPr of
                 Nothing -> "   " :: String
                 Just (0, _) -> "   " 
