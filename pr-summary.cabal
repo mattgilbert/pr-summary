@@ -1,4 +1,4 @@
-cabal-version:       2.4
+cabal-version:       2.2
 name:                pr-summary
 version:             0.1.0.0
 
@@ -8,7 +8,7 @@ author:              Matt Gilbert
 
 executable pr-summary
   main-is:             Main.hs
-  build-depends:       base ^>=4.12.0.0
+  build-depends:       base ^>=4.13.0.0
                      , http-client
                      , http-conduit
                      , bytestring
