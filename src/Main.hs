@@ -13,6 +13,7 @@ import System.FilePath ((</>))
 import Data.List
 import Data.Maybe
 import Data.Ord
+import Data.Char
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64 as Base64
@@ -64,6 +65,13 @@ data PR = PR
     , repository_url :: String
     , html_url :: String
     , user :: PRUser
+    , draft :: Bool
+    , labels :: [PRLabel]
+    }
+    deriving (Generic, Show)
+
+data PRLabel = PRLabel
+    { name :: String 
     }
     deriving (Generic, Show)
 
@@ -84,6 +92,7 @@ instance FromJSON PRComment
 instance FromJSON PRUser
 instance FromJSON PRList
 instance FromJSON PR
+instance FromJSON PRLabel
 
 instance Eq PR where
     PR{id=id1} == PR{id=id2} = id1 == id2
@@ -136,7 +145,7 @@ formatRepoName reposByUrl grp =
     where
         url = repository_url $ head grp
         maybeRepoName = Map.lookup url reposByUrl
-        repoName = fromJust maybeRepoName
+        repoName = maybe "???" (\x -> x) maybeRepoName
         separator = replicate (length repoName) '-'
 
 -- requires truecolor terminal, which most support, including iterm, but
@@ -154,14 +163,15 @@ printPrForCurTime :: UTCTime
                   -> Map.Map PR (Int, Bool)
                   -> PR 
                   -> String
-printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, number, title, created_at, user=PRUser{login}} =
-    printf "%s %s %s %-*s %-*s %-*s"
+printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, number, title, created_at, user=PRUser{login}, draft, labels} =
+    printf "%s %s %s %-*s %-*s %-*s %-*s"
         reviewText
         commentText
         prNumberText
         timeWidth formattedTime 
         loginWidth (ellipsisTruncate loginWidth login)
-        titleWidth (ellipsisTruncate titleWidth title)
+        testLabelWidth (testLabel)
+        titleWidth (ellipsisTruncate titleWidth titleText)
     where 
         reviewsWidth = 2
         commentWidth = 2
@@ -172,6 +182,15 @@ printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, numb
             Nothing -> 50
             Just TermSize.Window{TermSize.width=w} -> 
                 w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth) - 7
+        testLabelWidth = 7 :: Int
+        testLabel = if (length $ filter (\PRLabel{name} -> (map toLower name) == "ready to test") labels) > 0 then
+                        "\10004 TEST" :: String
+                    else
+                        "" :: String
+        -- testLabel = if (length labels) > 0 then
+        --                 intercalate " " (map (\PRLabel{name} -> name) labels)
+        --             else
+        --                 "" :: String
         anchorEscapeSeq = "\27]8;;%s\27\&\\%s\27]8;;\27\\\x7"
         prNumberText = printf anchorEscapeSeq html_url (show number) :: String
             -- "\27]8;;https://google.com/\27\&\\Link to example website\27]8;;\27\\\x7"
@@ -188,6 +207,10 @@ printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, numb
                 Just (1, _) -> "\10004  " 
                 Just (_, True) -> green <> "\10004" <> reset <> "\10004 "
                 Just (_, _) -> "\10004\10004 "
+        titleText = if draft == True then
+                        "(DRAFT) " ++ title
+                    else
+                        title
 
 ellipsisTruncate :: Int -> String -> String
 ellipsisTruncate n s =
