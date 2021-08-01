@@ -152,6 +152,10 @@ formatRepoName reposByUrl grp =
 -- not built in terminal.app
 -- \ESC[38;<r>;<g>;<b>;<m>m", where m is modifier (bold, italic, etc)
 green = "\ESC[38;2;0;225;0;1m"
+blue = "\ESC[38;2;0;0;200;1m"
+red = "\ESC[38;2;200;0;0;1m"
+gray = "\ESC[38;2;200;200;200;1m"
+defaultColor = "\ESC[39m"
 reset = "\ESC[0m"
 {--
  - show which PRs I've approved - green check
@@ -164,26 +168,29 @@ printPrForCurTime :: UTCTime
                   -> PR 
                   -> String
 printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, number, title, created_at, user=PRUser{login}, draft, labels} =
-    printf "%s %s %s %-*s %-*s %-*s %-*s"
+    printf "%s %s %s %-*s %-*s %s %-*s"
         reviewText
         commentText
         prNumberText
         timeWidth formattedTime 
         loginWidth (ellipsisTruncate loginWidth login)
-        testLabelWidth (testLabel)
+        labelTags
         titleWidth (ellipsisTruncate titleWidth titleText)
     where 
+        readyToTest = (length $ filter (\PRLabel{name} -> (map toLower name) == "ready to test") labels) > 0
+        -- rowColor = if readyToTest then gray else defaultColor
+                
         reviewsWidth = 2
         commentWidth = 2
         prNumWidth = 5
         timeWidth = 3
         loginWidth = 15
+        testLabelWidth = 7
         titleWidth = case termSize of
             Nothing -> 50
             Just TermSize.Window{TermSize.width=w} -> 
-                w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth) - 7
-        testLabelWidth = 7 :: Int
-        testLabel = if (length $ filter (\PRLabel{name} -> (map toLower name) == "ready to test") labels) > 0 then
+                w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth + (length labelTags)) - 7
+        testLabel = if readyToTest then
                         "\10004 TEST" :: String
                     else
                         "" :: String
@@ -198,19 +205,27 @@ printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, numb
         (commentCount, userComment) = fromMaybe (0, False) (Map.lookup pr commentsByPr)
         commentText = case (commentCount, userComment) of
                         (0, _) -> " "
-                        (c, True) -> green <> show c <> reset
+                        (c, True) -> green <> show c <> defaultColor
                         (c, False) -> show c
         reviewText = case Map.lookup pr reviewsByPr of
                 Nothing -> "   " :: String
                 Just (0, _) -> "   " 
-                Just (1, True) -> green <> "\10004  " <> reset
+                Just (1, True) -> green <> "\10004  " <> defaultColor
                 Just (1, _) -> "\10004  " 
-                Just (_, True) -> green <> "\10004" <> reset <> "\10004 "
+                Just (_, True) -> green <> "\10004" <> defaultColor <> "\10004 "
                 Just (_, _) -> "\10004\10004 "
+        labelTags = 
+            blue <> (intercalate " " $ (map (\PRLabel{name} -> "(" <> name <> ")") labels)) <> defaultColor
         titleText = if draft == True then
-                        "(DRAFT) " ++ title
+                        intercalate " " ([blue <> "(DRAFT)" <> defaultColor] <> [title])
                     else
-                        title
+                        conflictOrDraft <> " " <> title
+        conflictOrDraft = if draft then
+                            blue <> "(DRAFT)" <> defaultColor
+                          else
+                            ""
+                            -- fromMaybe "" $ fmap (\d -> if d then "" else red <> "(CONFLICTED)" <> defaultColor) mergeable
+
 
 ellipsisTruncate :: Int -> String -> String
 ellipsisTruncate n s =
@@ -280,7 +295,9 @@ getOpenPRs config@Config{username, token, orgName} = do
             , "type:pr" 
             , "state:open"
             ]
-    let query = [("q", Just (BS8.pack searchQuery))]
+    let query = [ ("q", Just (BS8.pack searchQuery))
+                , ("per_page", Just "100")
+                ]
     PRList{items} <- httpGetQuery config url query :: IO PRList
 
     pure items
