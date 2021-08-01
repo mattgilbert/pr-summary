@@ -8,6 +8,7 @@ author:              Matt Gilbert
 
 executable pr-summary
   main-is:             Main.hs
+  other-modules:       Types, Output
   build-depends:       base
                      , http-client
                      , http-conduit
