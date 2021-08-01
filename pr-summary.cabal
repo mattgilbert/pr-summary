@@ -12,6 +12,7 @@ executable pr-summary
                      , http-client
                      , http-conduit
                      , bytestring
+                     , text
                      , aeson
                      , base64-bytestring
                      , time
