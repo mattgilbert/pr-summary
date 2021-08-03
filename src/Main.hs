@@ -29,6 +29,7 @@ import qualified Text.Show as T
 import Data.Text.IO
 import Data.Text.Encoding as Enc
 import Control.Concurrent.Async
+import Control.Monad
 import qualified System.Console.Terminal.Size as TermSize
 
 import Types
@@ -62,17 +63,22 @@ main = do
     reviewCounts <- mapConcurrently (getPRReviewCount curUsername config) openPRs
     let reviewCountsByPr = Map.fromList reviewCounts
 
-    let printPR = printPrForCurTime curTime termSize commentCountsByPr reviewCountsByPr
-    let groupLines reposByUrl grp = 
-            [""] <> (formatRepoName reposByUrl grp) <> (fmap printPR (List.sortBy comparePrDate grp))
+    -- sort first, then group, because groupBy creates groups as their encoutnered (probably,
+    -- to make groupBy lazy)
+    let groupedPRs = List.groupBy sameRepo $ List.sortBy comparePrRepoUrls openPRs
+    printGroupedPRs curTime termSize reposByUrl commentCountsByPr reviewCountsByPr groupedPRs
 
-    let sortByRepoUrl = List.sortBy comparePrRepoUrls
-    let groupByRepoUrl = List.groupBy sameRepo
-    let groupedPRs = (groupByRepoUrl . sortByRepoUrl) openPRs
 
-    let groupTexts = fmap (groupLines reposByUrl) groupedPRs
-    putStrLn $ unlines $ List.concat groupTexts
+    -- let printPR = \pr@PR{number} -> printPrForCurTime curTime termSize commentCountsByPr (fromMaybe (PRReviewSummary 0 False) $ Map.lookup number reviewCountsByPr) pr
+    -- let prGroup reposByUrl prs = 
+    --         [""] <> (formatRepoName reposByUrl prs)
+    --              <> prLines
+    --         where
+    --             prLines = (fmap (\pr -> T.unlines $ printPR pr) (List.sortBy comparePrDate prs))
 
+
+    -- let groupTexts = fmap (prGroup reposByUrl) groupedPRs
+    -- putStrLn $ unlines $ List.concat groupTexts
 
 formatRepoName :: (Map.Map Text Text) -> [PR] -> [Text]
 formatRepoName reposByUrl grp =
@@ -148,7 +154,7 @@ getPRComments config@Config{orgName, username, token} pr@PR{number, repository_u
 
     pure (pr, (List.length comments, curUserCommented))
 
-getPRReviewCount :: Text -> Config -> PR -> IO (PR, (Int, Bool))
+getPRReviewCount :: Text -> Config -> PR -> IO (PRNumber, PRReviewSummary)
 getPRReviewCount curUsername config@Config{orgName, username, token} pr@PR{number, repository_url=repoUrl} = do
     let url = T.pack $ printf "%s/pulls/%d/reviews" repoUrl number
     reviews <- httpGet config url :: IO [PRReview]
@@ -163,7 +169,7 @@ getPRReviewCount curUsername config@Config{orgName, username, token} pr@PR{numbe
 
     let curUserApproved = curUsername `elem` uniqueApprovals
 
-    pure (pr, (approvalCount, curUserApproved))
+    pure (number, PRReviewSummary approvalCount curUserApproved)
 
 httpGet :: FromJSON a => Config -> Text -> IO a
 httpGet config url =

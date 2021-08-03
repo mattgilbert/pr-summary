@@ -21,7 +21,9 @@ executable pr-summary
                      , directory
                      , filepath
                      , terminal-size
+                     , ansi-terminal
                      , async
+                     , colour
 
   hs-source-dirs:      src
 

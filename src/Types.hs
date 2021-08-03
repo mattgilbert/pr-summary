@@ -37,6 +37,7 @@ data PRUser = PRUser
     }
     deriving (Generic, Show)
 
+type PRNumber = Int
 data PR = PR 
     { id :: Int
     , number :: Int 
@@ -66,6 +67,8 @@ data PRComment = PRComment
     , user :: PRUser
     }
     deriving (Generic, Show)
+
+data PRReviewSummary = PRReviewSummary { reviewCount :: Int, curUserApproved :: Bool }
 
 instance FromJSON PRReview
 instance FromJSON PRComment

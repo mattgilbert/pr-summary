@@ -9,9 +9,14 @@ import Data.Maybe
 import qualified Data.List as List
 import Data.Time.Clock
 import Data.Text as T
+import Data.Text.IO as T
 import Text.Printf
 import qualified Data.Map.Strict as Map
 import qualified System.Console.Terminal.Size as TermSize
+import System.Console.ANSI
+import Data.Colour.SRGB
+import Control.Monad
+import Debug.Trace
 
 import Types
 
@@ -23,47 +28,82 @@ blue = "\ESC[38;2;0;0;200;1m"
 red = "\ESC[38;2;200;0;0;1m"
 gray = "\ESC[38;2;200;200;200;1m"
 defaultColor = "\ESC[39m"
-reset = "\ESC[0m"
 
+checkmark = "\10004"
+
+_green :: Colour Float
+_green = sRGB (0.0 :: Float) 100.0 0.0
+
+-- data PrintCmd = ColorCmd (Colour Float) T.Text | NoColorCmd T.Text
+-- data PrintPadding = PadLeft Int | PadRight Int | NoPadding
+--
+
+
+printGroupedPRs :: UTCTime 
+                -> Maybe (TermSize.Window Int) 
+                -> Map.Map Text Text
+                -> Map.Map PR (Int, Bool)
+                -> Map.Map Int PRReviewSummary
+                -> [[PR]] 
+                -> IO ()
+printGroupedPRs curTime termSize reposByUrl commentsByPr reviewsByPr groupedPRs = do
+    let withRepoName = List.map (\prs -> (fromMaybe "???" $ Map.lookup (repoUrl prs) reposByUrl, prs)) groupedPRs
+    forM_ withRepoName (\(repoName, prs) -> do
+        T.putStrLn repoName
+        T.putStrLn "--------"
+
+        let prsAsTextChunks = fmap (\pr@PR{number} -> do
+                printPrForCurTime curTime termSize commentsByPr (fromMaybe (PRReviewSummary 0 False) (Map.lookup number reviewsByPr)) pr
+                ) prs :: [[Text]]
+        let columnized = columnize prsAsTextChunks
+        T.putStrLn $ T.unlines columnized
+        )
+
+
+repoUrl [] = ""
+repoUrl prs = repository_url $ List.head prs
+
+columnize :: [[Text]] -> [Text]
+columnize prChunkSets =
+    List.map (\prChunks -> T.intercalate " " $ List.zipWith (\chunk width -> padRight width chunk) prChunks colWidths) prChunkSets
+    where
+        colWidths :: [Int]
+        colWidths = 
+            List.foldr (\prChunks result -> mapZipAll lengthWithoutColor max prChunks result ) ([]:: [Int]) prChunkSets
+
+mapZipAll :: (a -> b) -> (b->b->b) -> [a]->[b]->[b]
+mapZipAll f g = go
+  where
+    go [] [] = []
+    go [] (y:ys) = y : go [] ys
+    go (x:xs) [] = f x : go xs []
+    go (x:xs) (y:ys) = g (f x) (y) : go xs ys
 
 printPrForCurTime :: UTCTime 
                   -> Maybe (TermSize.Window Int) 
                   -> Map.Map PR (Int, Bool)
-                  -> Map.Map PR (Int, Bool)
+                  -> PRReviewSummary
                   -> PR 
-                  -> Text
-printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, number, title, created_at, user=PRUser{login}, draft, labels} =
-    T.pack $ printf "%s %s %s %-*s %-*s %s %-*s"
-        reviewText
-        commentText
-        prNumberText
-        timeWidth formattedTime 
-        loginWidth (ellipsisTruncate loginWidth login)
-        labelTags
-        titleWidth (ellipsisTruncate titleWidth titleText)
+                  -> [Text]
+printPrForCurTime curTime termSize commentsByPr PRReviewSummary{reviewCount, curUserApproved} pr@PR{html_url, number, title, created_at, user=PRUser{login}, draft, labels} =
+    fmap T.strip
+        [ reviewText
+        , commentText
+        , prNumberText
+        , formattedTime
+        , (ellipsisTruncate loginWidth login)
+        , labelTags
+        , (ellipsisTruncate titleWidth titleText)
+        ]
     where 
         isReadyToTest PRLabel{name} = (T.toLower name) == "ready to test"
         readyToTest = (List.length $ List.filter isReadyToTest labels) > 0
-        -- rowColor = if readyToTest then gray else defaultColor
                 
-        reviewsWidth = 2
-        commentWidth = 2
-        prNumWidth = 5
-        timeWidth = 3
         loginWidth = 15
-        testLabelWidth = 7
         titleWidth = case termSize of
             Nothing -> 50
             Just TermSize.Window{TermSize.width=w} -> 
                 w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth + (T.length labelTags)) - 7
-        testLabel = if readyToTest then
-                        "\10004 TEST" :: Text
-                    else
-                        "" :: Text
-        -- testLabel = if (length labels) > 0 then
-        --                 intercalate " " (map (\PRLabel{name} -> name) labels)
-        --             else
-        --                 "" :: Text
         anchorEscapeSeq = "\27]8;;%s\27\&\\%s\27]8;;\27\\\x7"
         prNumberText = T.pack $ printf anchorEscapeSeq html_url (tshow number) :: Text
             -- "\27]8;;https://google.com/\27\&\\Link to example website\27]8;;\27\\\x7"
@@ -73,13 +113,12 @@ printPrForCurTime curTime termSize commentsByPr reviewsByPr pr@PR{html_url, numb
                         (0, _) -> (" " :: T.Text)
                         (c, True) -> green <> tshow c <> defaultColor
                         (c, False) -> tshow c
-        reviewText = case Map.lookup pr reviewsByPr of
-                Nothing -> "   " :: Text
-                Just (0, _) -> "   " 
-                Just (1, True) -> green <> "\10004  " <> defaultColor
-                Just (1, _) -> "\10004  " 
-                Just (_, True) -> green <> "\10004" <> defaultColor <> "\10004 "
-                Just (_, _) -> "\10004\10004 "
+        reviewText = case (reviewCount, curUserApproved) of
+                (0, _) -> "   " 
+                (1, True) -> green <> "\10004  " <> defaultColor
+                (1, _) -> "\10004  " 
+                (_, True) -> green <> "\10004" <> defaultColor <> "\10004 "
+                (_, _) -> "\10004\10004 "
         labelTags = 
             blue <> (intercalate " " $ (List.map (\PRLabel{name} -> "(" <> name <> ")") labels)) <> defaultColor
         titleText = if draft == True then
@@ -117,6 +156,24 @@ humanDuration curTime t =
         minutes = (totalSeconds `mod` 86400 `mod` 3600) `div` 60
         seconds = (totalSeconds `mod` 86400 `mod` 3600 `mod` 60)
 
+padLeft :: Int -> Text -> Text
+padLeft n txt =
+    (T.replicate padCount " ") <> txt
+    where
+        padCount = n - (lengthWithoutColor txt)
+
+padRight :: Int -> Text -> Text
+padRight n txt =
+    result
+    where
+        result = txt <> (T.replicate padCount " ")
+        padCount = n - lenWithoutColor
+        lenWithoutColor = lengthWithoutColor txt
 
 tshow :: Show a => a -> T.Text
 tshow = T.pack . Prelude.show 
+
+lengthWithoutColor :: Text -> Int
+lengthWithoutColor txt =
+    T.length $ T.replace green "" $ T.replace red "" $ T.replace defaultColor "" txt
+
