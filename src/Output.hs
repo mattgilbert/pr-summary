@@ -23,21 +23,15 @@ import Types
 -- requires truecolor terminal, which most support, including iterm, but
 -- not built in terminal.app
 -- \ESC[38;<r>;<g>;<b>;<m>m", where m is modifier (bold, italic, etc)
+-- TODO: switch to color codes instead of RGB so it's more compatible with various color schemes
 green = "\ESC[38;2;0;225;0;1m"
 blue = "\ESC[38;2;0;0;200;1m"
 red = "\ESC[38;2;200;0;0;1m"
 gray = "\ESC[38;2;200;200;200;1m"
 defaultColor = "\ESC[39m"
+reset = "\ESC[0m"
 
 checkmark = "\10004"
-
-_green :: Colour Float
-_green = sRGB (0.0 :: Float) 100.0 0.0
-
--- data PrintCmd = ColorCmd (Colour Float) T.Text | NoColorCmd T.Text
--- data PrintPadding = PadLeft Int | PadRight Int | NoPadding
---
-
 
 printGroupedPRs :: UTCTime 
                 -> Maybe (TermSize.Window Int) 
@@ -50,7 +44,7 @@ printGroupedPRs curTime termSize reposByUrl commentsByPr reviewsByPr groupedPRs 
     let withRepoName = List.map (\prs -> (fromMaybe "???" $ Map.lookup (repoUrl prs) reposByUrl, prs)) groupedPRs
     forM_ withRepoName (\(repoName, prs) -> do
         T.putStrLn repoName
-        T.putStrLn "--------"
+        T.putStrLn $ T.replicate (T.length repoName) "-"
 
         let prsAsTextChunks = fmap (\pr@PR{number} -> do
                 printPrForCurTime curTime termSize commentsByPr (fromMaybe (PRReviewSummary 0 False) (Map.lookup number reviewsByPr)) pr
@@ -99,37 +93,43 @@ printPrForCurTime curTime termSize commentsByPr PRReviewSummary{reviewCount, cur
         isReadyToTest PRLabel{name} = (T.toLower name) == "ready to test"
         readyToTest = (List.length $ List.filter isReadyToTest labels) > 0
                 
+        -- TODO: ditch all these lengths and figure out a better way to handle terminal size
+        reviewsWidth = 2
+        commentWidth = 2
+        prNumWidth = 5
+        timeWidth = 3
+        testLabelWidth = 7
         loginWidth = 15
         titleWidth = case termSize of
             Nothing -> 50
             Just TermSize.Window{TermSize.width=w} -> 
                 w - (reviewsWidth + commentWidth + prNumWidth + timeWidth + loginWidth + (T.length labelTags)) - 7
-        anchorEscapeSeq = "\27]8;;%s\27\&\\%s\27]8;;\27\\\x7"
+        anchorEscapeSeq = "\27]8;;%s\27\&\\%s\27]8;;\27\\\x7 \ESC[0m"
         prNumberText = T.pack $ printf anchorEscapeSeq html_url (tshow number) :: Text
             -- "\27]8;;https://google.com/\27\&\\Link to example website\27]8;;\27\\\x7"
         formattedTime = humanDuration curTime created_at
         (commentCount, userComment) = fromMaybe (0, False) (Map.lookup pr commentsByPr)
         commentText = case (commentCount, userComment) of
-                        (0, _) -> (" " :: T.Text)
-                        (c, True) -> green <> tshow c <> defaultColor
+                        (0, _) -> ("")
+                        (c, True) -> green <> tshow c <> reset
                         (c, False) -> tshow c
         reviewText = case (reviewCount, curUserApproved) of
-                (0, _) -> "   " 
-                (1, True) -> green <> "\10004  " <> defaultColor
-                (1, _) -> "\10004  " 
-                (_, True) -> green <> "\10004" <> defaultColor <> "\10004 "
-                (_, _) -> "\10004\10004 "
+                (0, _) -> "" 
+                (1, True) -> green <> checkmark <> reset
+                (1, _) -> checkmark
+                (_, True) -> green <> checkmark <> reset <> checkmark
+                (_, _) -> checkmark <> checkmark
         labelTags = 
-            blue <> (intercalate " " $ (List.map (\PRLabel{name} -> "(" <> name <> ")") labels)) <> defaultColor
+            blue <> (intercalate " " $ (List.map (\PRLabel{name} -> "(" <> name <> ")") labels)) <> reset
         titleText = if draft == True then
-                        intercalate " " ([blue <> "(DRAFT)" <> defaultColor] <> [title])
+                        intercalate " " ([blue <> "(DRAFT)" <> reset] <> [title])
                     else
                         conflictOrDraft <> " " <> title
         conflictOrDraft = if draft then
-                            blue <> "(DRAFT)" <> defaultColor
+                            blue <> "(DRAFT)" <> reset
                           else
                             ""
-                            -- fromMaybe "" $ fmap (\d -> if d then "" else red <> "(CONFLICTED)" <> defaultColor) mergeable
+                            -- fromMaybe "" $ fmap (\d -> if d then "" else red <> "(CONFLICTED)" <> reset) mergeable
 
 ellipsisTruncate :: Int -> Text -> Text
 ellipsisTruncate n s =
@@ -175,5 +175,5 @@ tshow = T.pack . Prelude.show
 
 lengthWithoutColor :: Text -> Int
 lengthWithoutColor txt =
-    T.length $ T.replace green "" $ T.replace red "" $ T.replace defaultColor "" txt
+    T.length $ T.replace green "" $ T.replace red "" $ T.replace reset "" txt
 
